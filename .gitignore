@@ -1,0 +1,26 @@
+# secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.key
+deployer.json
+auryx-miner.json
+
+# build output
+auryx-miner
+auryx-miner.exe
+miner/auryx-miner
+miner/auryx-miner.exe
+
+# node / hardhat
+node_modules/
+dist/
+build/
+artifacts/
+cache/
+coverage/
+typechain-types/
+
+# misc
+*.log
+.DS_Store

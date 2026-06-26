@@ -1,0 +1,311 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"flag"
+	"fmt"
+	"math/big"
+	"os"
+	"os/signal"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Baked-in defaults so a user only needs to supply their private key.
+const (
+	defaultRPC      = "https://sepolia.base.org"
+	defaultContract = "0x619Ab437232f58fd0FC7606b98BB2D4948734750"
+)
+
+func formatAURYX(wei *big.Int) string {
+	if wei == nil {
+		return "0"
+	}
+	return new(big.Int).Div(wei, big.NewInt(1_000_000_000_000_000_000)).String()
+}
+
+// runMining mines round after round. If maxBlocks > 0 it stops after that many
+// wins (used by tests / scripted runs); 0 means run until interrupted.
+func runMining(chain *Chain, cores int, maxBlocks int) {
+	ctx := context.Background()
+	var miner20 [20]byte
+	copy(miner20[:], chain.From().Bytes())
+	won := 0
+
+	// Ctrl-C stops mining and returns to the menu (signal handling is scoped to
+	// here via defer signal.Stop, so Ctrl-C at the menu still quits normally).
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+	userStop := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-sigCh:
+			close(userStop)
+		case <-done:
+		}
+	}()
+
+	rewardStr := "50"
+	if r, err := chain.Reward(ctx); err == nil {
+		rewardStr = formatAURYX(r)
+	}
+	uiInfo(fmt.Sprintf("Mining with %d core(s). Press Ctrl-C to stop and return to the menu.", cores))
+	fmt.Println()
+
+	for {
+		select {
+		case <-userStop:
+			fmt.Println()
+			uiInfo(fmt.Sprintf("Stopped. You won %d block(s) this run.", won))
+			uiInfo("Press Enter to return to the menu.")
+			ask("")
+			return
+		default:
+		}
+
+		challenge, err := chain.Challenge(ctx)
+		if err != nil {
+			uiErr("Can't reach the network - retrying in 3s...")
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		target, err := chain.Target(ctx)
+		if err != nil {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		var once sync.Once
+		stop := make(chan struct{})
+		closeStop := func() { once.Do(func() { close(stop) }) }
+
+		// abandon the grind if someone else mines the block (challenge changes)
+		go func() {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					if cur, e := chain.Challenge(ctx); e == nil && cur != challenge {
+						closeStop()
+						return
+					}
+				}
+			}
+		}()
+		// stop the grind immediately if the user pressed Ctrl-C
+		go func() {
+			select {
+			case <-userStop:
+				closeStop()
+			case <-stop:
+			}
+		}()
+
+		sol := MineMultiCore(challenge, miner20, target, cores, stop)
+		closeStop()
+		if sol == nil {
+			continue // stale, or user stopped (handled at the top of the loop)
+		}
+
+		tx, err := chain.SubmitMint(ctx, sol.Nonce, sol.Digest)
+		if err != nil {
+			uiErr("Submit failed - trying again.")
+			continue
+		}
+		ok, err := chain.WaitMined(ctx, tx)
+		if err != nil {
+			uiErr("Transaction error - trying again.")
+			continue
+		}
+		if !ok {
+			uiInfo("Beaten to that block - trying again.")
+			continue
+		}
+		won++
+		bal, _ := chain.Balance(ctx, chain.From())
+		uiWon(won, rewardStr, formatAURYX(bal))
+		if maxBlocks > 0 && won >= maxBlocks {
+			return
+		}
+	}
+}
+
+var stdin = bufio.NewReader(os.Stdin)
+
+func ask(prompt string) string {
+	fmt.Print(prompt)
+	line, _ := stdin.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func interactiveSetup(cfg Config) Config {
+	fmt.Println("First-time setup:")
+	fmt.Printf("  Server:   %s\n", cfg.RPC)
+	fmt.Printf("  Contract: %s\n", cfg.Contract)
+	fmt.Println("  Just paste your mining wallet's private key (from MetaMask). It's")
+	fmt.Println("  saved locally in auryx-miner.json and never leaves your machine.")
+	if cfg.PrivKey == "" {
+		cfg.PrivKey = ask("  Private key: ")
+	}
+	saveConfig(cfg)
+	return cfg
+}
+
+func settingsMenu(cfg *Config) {
+	total := runtime.NumCPU()
+	for {
+		uiTitle("CPU SETTINGS")
+		uiRow("Detected", fmt.Sprintf("%d cores", total))
+		uiRow("Current", fmt.Sprintf("%s (%d cores)", cfg.coresLabel(), cfg.resolveCores()))
+		fmt.Println()
+		uiOption("1", fmt.Sprintf("Use all cores (%d)", total))
+		uiOption("2", fmt.Sprintf("Use all but one (%d) - recommended", max(1, total-1)))
+		uiOption("3", "Single core")
+		uiOption("4", "Custom number")
+		uiOption("0", "Back")
+		switch ask("\n   > ") {
+		case "1":
+			cfg.CoresMode = "all"
+			saveConfig(*cfg)
+		case "2":
+			cfg.CoresMode = "all_but_one"
+			saveConfig(*cfg)
+		case "3":
+			cfg.CoresMode = "single"
+			saveConfig(*cfg)
+		case "4":
+			if n, err := strconv.Atoi(ask("  How many cores? ")); err == nil {
+				cfg.CoresMode = "custom"
+				cfg.Cores = n
+				saveConfig(*cfg)
+			}
+		case "0":
+			return
+		}
+	}
+}
+
+// menu returns an action for runMenu to handle: "quit", "changekey", or "logout".
+func menu(chain *Chain, cfg *Config) string {
+	for {
+		bal := "(checking...)"
+		if b, err := chain.Balance(context.Background(), chain.From()); err == nil {
+			bal = formatAURYX(b) + " AURYX"
+		}
+		uiTitle("A U R Y X   M I N E R")
+		uiRow("Wallet", shortAddr(chain.From().Hex()))
+		uiRow("Balance", bal)
+		uiRow("Network", "Base Sepolia")
+		uiRow("CPU", fmt.Sprintf("%s (%d of %d cores)", cfg.coresLabel(), cfg.resolveCores(), runtime.NumCPU()))
+		fmt.Println()
+		uiOption("1", "Start mining")
+		uiOption("2", "Settings (CPU cores)")
+		uiOption("3", "Change wallet")
+		uiOption("4", "Log out")
+		uiOption("0", "Quit")
+		switch ask("\n   > ") {
+		case "1":
+			runMining(chain, cfg.resolveCores(), 0)
+		case "2":
+			settingsMenu(cfg)
+		case "3":
+			return "changekey"
+		case "4":
+			return "logout"
+		case "0":
+			return "quit"
+		}
+	}
+}
+
+func main() {
+	enableColors()
+	rpc := flag.String("rpc", "", "RPC URL override")
+	contract := flag.String("contract", "", "contract address override")
+	key := flag.String("key", "", "private key override")
+	blocks := flag.Int("blocks", 0, "mine N blocks then exit (0 = interactive menu)")
+	coresFlag := flag.Int("cores", 0, "cores override (0 = use config)")
+	flag.Parse()
+
+	cfg := loadConfig()
+	if *key != "" {
+		cfg.PrivKey = *key
+	}
+	if *coresFlag > 0 {
+		cfg.CoresMode = "custom"
+		cfg.Cores = *coresFlag
+	}
+	// The coin + network are baked into the binary (overridable only by an explicit
+	// --rpc/--contract flag). We force them here, ignoring any saved values, so a
+	// redeploy is picked up on rebuild and a stale saved address can't mislead.
+	cfg.RPC = defaultRPC
+	if *rpc != "" {
+		cfg.RPC = *rpc
+	}
+	cfg.Contract = defaultContract
+	if *contract != "" {
+		cfg.Contract = *contract
+	}
+
+	if cfg.PrivKey == "" {
+		if *blocks > 0 {
+			fmt.Println("missing --key for non-interactive run")
+			os.Exit(1)
+		}
+		cfg = interactiveSetup(cfg)
+	}
+
+	if *blocks > 0 {
+		chain, err := NewChain(cfg.RPC, cfg.Contract, cfg.PrivKey)
+		if err != nil {
+			fmt.Println("connect error:", err)
+			os.Exit(1)
+		}
+		runMining(chain, cfg.resolveCores(), *blocks)
+		return
+	}
+	runMenu(&cfg)
+}
+
+// runMenu connects with the current key and runs the menu, rebuilding the
+// connection when the user changes wallet, and clearing the key on log out.
+func runMenu(cfg *Config) {
+	for {
+		chain, err := NewChain(cfg.RPC, cfg.Contract, cfg.PrivKey)
+		if err != nil {
+			fmt.Println("connect error:", err)
+			ask("  Press Enter to close.") // so a double-clicked window doesn't vanish
+			return
+		}
+		switch menu(chain, cfg) {
+		case "quit":
+			return
+		case "changekey":
+			fmt.Println("\n  Switch wallet — paste a different private key (or leave blank to cancel).")
+			k := ask("  Private key: ")
+			if k != "" {
+				cfg.PrivKey = k
+				saveConfig(*cfg)
+				fmt.Println("  Wallet changed.")
+			}
+			// loop reconnects with the new key
+		case "logout":
+			cfg.PrivKey = ""
+			saveConfig(*cfg)
+			fmt.Println("\n  Logged out — your key has been removed from this computer.")
+			fmt.Println("  Next launch will ask for a key again.")
+			ask("  Press Enter to close.")
+			return
+		}
+	}
+}
