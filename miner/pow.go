@@ -4,9 +4,16 @@ import (
 	"encoding/binary"
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/crypto/sha3"
 )
+
+// hashCounter is a running total of hashes tried across all workers, for the
+// live hashrate readout. Workers add to it in batches to avoid contention.
+var hashCounter int64
+
+func hashesDone() int64 { return atomic.LoadInt64(&hashCounter) }
 
 // Solution is a winning nonce and the digest it produced.
 type Solution struct {
@@ -78,7 +85,8 @@ func MineMultiCore(challenge [32]byte, miner [20]byte, target *big.Int, cores in
 			nonce := start
 			i := 0
 			for {
-				if i&0x3FFF == 0 { // check stop every 16384 hashes
+				if i&0x3FFF == 0 { // check stop + tally hashrate every 16384 hashes
+					atomic.AddInt64(&hashCounter, 0x4000)
 					select {
 					case <-internalStop:
 						return

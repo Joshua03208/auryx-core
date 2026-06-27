@@ -28,6 +28,19 @@ func formatAURYX(wei *big.Int) string {
 	return new(big.Int).Div(wei, big.NewInt(1_000_000_000_000_000_000)).String()
 }
 
+func formatRate(hps float64) string {
+	switch {
+	case hps >= 1e9:
+		return fmt.Sprintf("%.2f GH/s", hps/1e9)
+	case hps >= 1e6:
+		return fmt.Sprintf("%.1f MH/s", hps/1e6)
+	case hps >= 1e3:
+		return fmt.Sprintf("%.0f KH/s", hps/1e3)
+	default:
+		return fmt.Sprintf("%.0f H/s", hps)
+	}
+}
+
 // runMining mines round after round. If maxBlocks > 0 it stops after that many
 // wins (used by tests / scripted runs); 0 means run until interrupted.
 func runMining(chain *Chain, cores int, maxBlocks int) {
@@ -49,6 +62,25 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 		case <-sigCh:
 			close(userStop)
 		case <-done:
+		}
+	}()
+
+	// live hashrate readout
+	go func() {
+		t := time.NewTicker(4 * time.Second)
+		defer t.Stop()
+		last, lastT := hashesDone(), time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-t.C:
+				cur := hashesDone()
+				if dt := now.Sub(lastT).Seconds(); dt > 0 && cur > last {
+					uiInfo("hashing at " + formatRate(float64(cur-last)/dt))
+				}
+				last, lastT = cur, now
+			}
 		}
 	}()
 
