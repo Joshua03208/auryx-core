@@ -93,11 +93,16 @@ func expectedHashes(target *big.Int) float64 {
 
 // runMining mines round after round. If maxBlocks > 0 it stops after that many
 // wins (used by tests / scripted runs); 0 means run until interrupted.
-func runMining(chain *Chain, cores int, maxBlocks int) {
+func runMining(chain *Chain, cfg *Config, maxBlocks int) {
 	ctx := context.Background()
+	cores := cfg.resolveCores()
 	var miner20 [20]byte
 	copy(miner20[:], chain.From().Bytes())
 	won := 0
+
+	// count time actually spent mining toward this session's stats
+	runStart := time.Now()
+	defer func() { session.addMining(time.Since(runStart)) }()
 
 	// Ctrl-C stops mining and returns to the menu (signal handling is scoped to
 	// here via defer signal.Stop, so Ctrl-C at the menu still quits normally).
@@ -115,6 +120,14 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 		}
 	}()
 
+	// Reward is constant until an era boundary (a long way off), so fetch once.
+	rewardBig := new(big.Int).Mul(big.NewInt(50), big.NewInt(1_000_000_000_000_000_000))
+	if r, err := chain.Reward(ctx); err == nil {
+		rewardBig = r
+	}
+	rewardStr := formatAURYX(rewardBig)
+	rewardAURYX := weiToAURYX(rewardBig)
+
 	// Per-block stats shared with the live readout below. blockExpected is the
 	// average hashes this block should take (from its difficulty); blockStartHash
 	// is the hash count when the block began, so cur-start = hashes into this block.
@@ -122,8 +135,9 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 	var blockStartHash int64
 	var blockExpected float64
 
-	// live progress readout: how far through the *average* effort this block is.
-	// It can pass 100% (this block is taking longer than average) — that's normal.
+	// live progress readout: how far through the *average* effort this block is
+	// (can pass 100% — just an unlucky-long block), plus a live earnings + network
+	// share estimate from your hashrate and the current difficulty.
 	go func() {
 		t := time.NewTicker(4 * time.Second)
 		defer t.Stop()
@@ -142,12 +156,21 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 					rmu.Unlock()
 					if exp > 0 && rate > 0 {
 						pct := float64(cur-start) / exp * 100
-						note := ""
-						if pct >= 100 {
-							note = "  (this one's taking longer than usual - normal, just unlucky)"
+						earnPerHr := rate * 3600 / exp * rewardAURYX
+						nb := session.networkBlock()
+						if nb <= 0 {
+							nb = 60 // until we've measured, use the contract's target
 						}
-						uiInfo(fmt.Sprintf("mining . %.0f%% of avg block . %s . ~%ds/block%s",
-							pct, formatRate(rate), int(exp/rate), note))
+						share := rate * nb / exp * 100
+						if share > 100 {
+							share = 100
+						}
+						line := fmt.Sprintf("mining . %.0f%% of avg block . %s . ~%s AURYX/hr . ~%.0f%% of net",
+							pct, formatRate(rate), fmtAmt(earnPerHr), share)
+						if pct >= 100 {
+							line += "  (longer than usual - normal)"
+						}
+						uiInfo(line)
 					} else {
 						uiInfo("hashing at " + formatRate(rate))
 					}
@@ -157,12 +180,11 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 		}
 	}()
 
-	rewardStr := "50"
-	if r, err := chain.Reward(ctx); err == nil {
-		rewardStr = formatAURYX(r)
-	}
 	uiInfo(fmt.Sprintf("Mining with %d core(s). Press Ctrl-C to stop and return to the menu.", cores))
 	fmt.Println()
+
+	var lastChallenge [32]byte
+	var lastBlockAt time.Time
 
 	for {
 		select {
@@ -181,6 +203,17 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
+
+		// a changed challenge means a block was found (by anyone) — time it for the
+		// network-block-time estimate that drives the network-share calculation.
+		if challenge != lastChallenge {
+			if !lastBlockAt.IsZero() {
+				session.recordBlockTime(time.Since(lastBlockAt).Seconds())
+			}
+			lastBlockAt = time.Now()
+			lastChallenge = challenge
+		}
+
 		target, err := chain.Target(ctx)
 		if err != nil {
 			time.Sleep(3 * time.Second)
@@ -244,6 +277,9 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 			continue
 		}
 		won++
+		session.recordWin(rewardBig)
+		cfg.addLifetime(rewardBig)
+		saveConfig(*cfg)
 		bal, _ := chain.Balance(ctx, chain.From())
 		uiWon(won, rewardStr, formatAURYX(bal))
 		if maxBlocks > 0 && won >= maxBlocks {
@@ -327,18 +363,24 @@ func menu(chain *Chain, cfg *Config) string {
 		}
 		fmt.Println()
 		uiOption("1", "Start mining")
-		uiOption("2", "Settings (CPU cores)")
-		uiOption("3", "Change wallet")
-		uiOption("4", "Log out")
+		uiOption("2", "Stats (session + all-time)")
+		uiOption("3", "Leaderboard")
+		uiOption("4", "Settings (CPU cores)")
+		uiOption("5", "Change wallet")
+		uiOption("6", "Log out")
 		uiOption("0", "Quit")
 		switch ask("\n   > ") {
 		case "1":
-			runMining(chain, cfg.resolveCores(), 0)
+			runMining(chain, cfg, 0)
 		case "2":
-			settingsMenu(cfg)
+			showStats(chain, cfg)
 		case "3":
-			return "changekey"
+			showLeaderboard(chain)
 		case "4":
+			settingsMenu(cfg)
+		case "5":
+			return "changekey"
+		case "6":
 			return "logout"
 		case "0":
 			return "quit"
@@ -389,7 +431,7 @@ func main() {
 			fmt.Println("connect error:", err)
 			os.Exit(1)
 		}
-		runMining(chain, cfg.resolveCores(), *blocks)
+		runMining(chain, &cfg, *blocks)
 		return
 	}
 	// One-off check for a newer release, so the menu can flag it. Non-fatal.
