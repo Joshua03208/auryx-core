@@ -142,8 +142,12 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 					rmu.Unlock()
 					if exp > 0 && rate > 0 {
 						pct := float64(cur-start) / exp * 100
-						uiInfo(fmt.Sprintf("mining . %.0f%% of avg block . %s . ~%ds/block",
-							pct, formatRate(rate), int(exp/rate)))
+						note := ""
+						if pct >= 100 {
+							note = "  (this one's taking longer than usual - normal, just unlucky)"
+						}
+						uiInfo(fmt.Sprintf("mining . %.0f%% of avg block . %s . ~%ds/block%s",
+							pct, formatRate(rate), int(exp/rate), note))
 					} else {
 						uiInfo("hashing at " + formatRate(rate))
 					}
