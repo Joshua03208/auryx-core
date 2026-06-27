@@ -19,7 +19,7 @@ import (
 
 // Baked-in defaults so a user only needs to supply their private key.
 const (
-	minerVersion     = "0.1.1"
+	minerVersion     = "0.1.2"
 	defaultRPC       = "https://sepolia.base.org"
 	defaultContract  = "0x619Ab437232f58fd0FC7606b98BB2D4948734750"
 	latestReleaseAPI = "https://api.github.com/repos/Joshua03208/auryx-core/releases/latest"
