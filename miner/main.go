@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -17,9 +19,45 @@ import (
 
 // Baked-in defaults so a user only needs to supply their private key.
 const (
-	defaultRPC      = "https://sepolia.base.org"
-	defaultContract = "0x619Ab437232f58fd0FC7606b98BB2D4948734750"
+	minerVersion     = "0.1.1"
+	defaultRPC       = "https://sepolia.base.org"
+	defaultContract  = "0x619Ab437232f58fd0FC7606b98BB2D4948734750"
+	latestReleaseAPI = "https://api.github.com/repos/Joshua03208/auryx-core/releases/latest"
+	releasesPage     = "github.com/Joshua03208/auryx-core/releases"
 )
+
+// updateTo holds a newer available version (e.g. "0.1.2"), or "" if up to date.
+var updateTo string
+
+// fetchLatestVersion returns the latest released version (e.g. "0.1.2"), or "".
+func fetchLatestVersion() string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(latestReleaseAPI)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var data struct {
+		TagName string `json:"tag_name"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&data) != nil {
+		return ""
+	}
+	return strings.TrimPrefix(data.TagName, "v")
+}
+
+// isNewer reports whether dotted version a is newer than b (e.g. "0.2.0" > "0.1.1").
+func isNewer(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		na, _ := strconv.Atoi(pa[i])
+		nb, _ := strconv.Atoi(pb[i])
+		if na != nb {
+			return na > nb
+		}
+	}
+	return len(pa) > len(pb)
+}
 
 func formatAURYX(wei *big.Int) string {
 	if wei == nil {
@@ -193,27 +231,18 @@ func interactiveSetup(cfg Config) Config {
 	return cfg
 }
 
-// settingsMenu lets the user pick CPU cores and an optional faster RPC. Returns
-// true if the RPC changed, so the caller can reconnect with it.
-func settingsMenu(cfg *Config) bool {
+// settingsMenu lets the user pick how many CPU cores to mine with.
+func settingsMenu(cfg *Config) {
 	total := runtime.NumCPU()
-	rpcChanged := false
 	for {
-		rpcShown := cfg.RPC
-		if rpcShown == "" || rpcShown == defaultRPC {
-			rpcShown = defaultRPC + "  (default, shared)"
-		}
-		uiTitle("SETTINGS")
+		uiTitle("CPU SETTINGS")
 		uiRow("Detected", fmt.Sprintf("%d cores", total))
-		uiRow("CPU use", fmt.Sprintf("%s (%d cores)", cfg.coresLabel(), cfg.resolveCores()))
-		uiRow("RPC", rpcShown)
+		uiRow("Current", fmt.Sprintf("%s (%d cores)", cfg.coresLabel(), cfg.resolveCores()))
 		fmt.Println()
 		uiOption("1", fmt.Sprintf("Use all cores (%d)", total))
 		uiOption("2", fmt.Sprintf("Use all but one (%d) - recommended", max(1, total-1)))
 		uiOption("3", "Single core")
 		uiOption("4", "Custom number of cores")
-		uiOption("5", "Set a faster RPC (paste your own dedicated URL)")
-		uiOption("6", "Reset RPC to default")
 		uiOption("0", "Back")
 		switch ask("\n   > ") {
 		case "1":
@@ -231,28 +260,8 @@ func settingsMenu(cfg *Config) bool {
 				cfg.Cores = n
 				saveConfig(*cfg)
 			}
-		case "5":
-			fmt.Println("  Get a FREE Base Sepolia RPC from alchemy.com or quicknode.com")
-			fmt.Println("  (sign up -> create a Base Sepolia app -> copy the https URL).")
-			fmt.Println("  Your own RPC means far less 'beaten / submit failed'. Blank = cancel.")
-			u := strings.TrimSpace(ask("  RPC URL: "))
-			if u != "" {
-				cfg.RPC = u
-				saveConfig(*cfg)
-				rpcChanged = true
-				uiInfo("Saved. It'll be used next time you start mining.")
-				ask("  Press Enter.")
-			}
-		case "6":
-			if cfg.RPC != "" && cfg.RPC != defaultRPC {
-				cfg.RPC = ""
-				saveConfig(*cfg)
-				rpcChanged = true
-			}
-			uiInfo("RPC reset to the default.")
-			ask("  Press Enter.")
 		case "0":
-			return rpcChanged
+			return
 		}
 	}
 }
@@ -269,9 +278,14 @@ func menu(chain *Chain, cfg *Config) string {
 		uiRow("Balance", bal)
 		uiRow("Network", "Base Sepolia")
 		uiRow("CPU", fmt.Sprintf("%s (%d of %d cores)", cfg.coresLabel(), cfg.resolveCores(), runtime.NumCPU()))
+		uiRow("Version", "v"+minerVersion)
+		if updateTo != "" {
+			fmt.Printf("\n   %s%sUpdate available: v%s%s  %s%s%s\n",
+				cGold, cBold, updateTo, cReset, cGray, releasesPage, cReset)
+		}
 		fmt.Println()
 		uiOption("1", "Start mining")
-		uiOption("2", "Settings (CPU + RPC)")
+		uiOption("2", "Settings (CPU cores)")
 		uiOption("3", "Change wallet")
 		uiOption("4", "Log out")
 		uiOption("0", "Quit")
@@ -279,9 +293,7 @@ func menu(chain *Chain, cfg *Config) string {
 		case "1":
 			runMining(chain, cfg.resolveCores(), 0)
 		case "2":
-			if settingsMenu(cfg) {
-				return "reconnect" // RPC changed → runMenu rebuilds the connection
-			}
+			settingsMenu(cfg)
 		case "3":
 			return "changekey"
 		case "4":
@@ -312,16 +324,10 @@ func main() {
 	// The coin + network are baked into the binary (overridable only by an explicit
 	// --rpc/--contract flag). We force them here, ignoring any saved values, so a
 	// redeploy is picked up on rebuild and a stale saved address can't mislead.
-	// RPC: a custom RPC saved in Settings wins, else the baked-in default. A
-	// dedicated RPC cuts the "beaten / submit failed" you get on the busy public one.
-	if cfg.RPC == "" {
-		cfg.RPC = defaultRPC
-	}
+	cfg.RPC = defaultRPC
 	if *rpc != "" {
 		cfg.RPC = *rpc
 	}
-	// The contract is always the baked-in current one (ignore any saved value) so a
-	// redeploy is picked up on rebuild and a stale saved address can't mislead.
 	cfg.Contract = defaultContract
 	if *contract != "" {
 		cfg.Contract = *contract
@@ -343,6 +349,10 @@ func main() {
 		}
 		runMining(chain, cfg.resolveCores(), *blocks)
 		return
+	}
+	// One-off check for a newer release, so the menu can flag it. Non-fatal.
+	if latest := fetchLatestVersion(); latest != "" && isNewer(latest, minerVersion) {
+		updateTo = latest
 	}
 	runMenu(&cfg)
 }
