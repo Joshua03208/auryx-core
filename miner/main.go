@@ -100,9 +100,14 @@ func runMining(chain *Chain, cfg *Config, maxBlocks int) {
 	copy(miner20[:], chain.From().Bytes())
 	won := 0
 
-	// count time actually spent mining toward this session's stats
+	// count time actually spent mining toward this session's + all-time stats
 	runStart := time.Now()
-	defer func() { session.addMining(time.Since(runStart)) }()
+	defer func() {
+		d := time.Since(runStart)
+		session.addMining(d)
+		cfg.LifetimeSeconds += d.Seconds()
+		saveConfig(*cfg)
+	}()
 
 	// Ctrl-C stops mining and returns to the menu (signal handling is scoped to
 	// here via defer signal.Stop, so Ctrl-C at the menu still quits normally).
@@ -146,6 +151,8 @@ func runMining(chain *Chain, cfg *Config, maxBlocks int) {
 			select {
 			case <-done:
 				return
+			case <-userStop:
+				return // Ctrl-C: stop printing immediately
 			case now := <-t.C:
 				cur := hashesDone()
 				dt := now.Sub(lastT).Seconds()
@@ -190,9 +197,7 @@ func runMining(chain *Chain, cfg *Config, maxBlocks int) {
 		select {
 		case <-userStop:
 			fmt.Println()
-			uiInfo(fmt.Sprintf("Stopped. You won %d block(s) this run.", won))
-			uiInfo("Press Enter to return to the menu.")
-			ask("")
+			uiInfo(fmt.Sprintf("Stopped - won %d block(s) this run. Back to the menu.", won))
 			return
 		default:
 		}
@@ -346,12 +351,21 @@ func settingsMenu(cfg *Config) {
 
 // menu returns an action for runMenu to handle: "quit", "changekey", or "logout".
 func menu(chain *Chain, cfg *Config) string {
+	go refreshRank(chain.From().Hex()) // fetch leaderboard position in the background
 	for {
 		bal := "(checking...)"
 		if b, err := chain.Balance(context.Background(), chain.From()); err == nil {
 			bal = formatAURYX(b) + " AURYX"
 		}
 		uiTitle("A U R Y X   M I N E R")
+		rank := currentRank()
+		if rank == "" {
+			rank = "checking..."
+		}
+		uiRow("Leaderboard", rank)
+		uiRow("All-time", fmt.Sprintf("%d blocks . %s AURYX . %s mined",
+			cfg.LifetimeBlocks, formatAURYX(lifetimeWei(cfg)), humanDur(cfg.LifetimeSeconds)))
+		fmt.Println()
 		uiRow("Wallet", shortAddr(chain.From().Hex()))
 		uiRow("Balance", bal)
 		uiRow("Network", "Base Sepolia")
@@ -372,6 +386,7 @@ func menu(chain *Chain, cfg *Config) string {
 		switch ask("\n   > ") {
 		case "1":
 			runMining(chain, cfg, 0)
+			go refreshRank(chain.From().Hex()) // position likely changed
 		case "2":
 			showStats(chain, cfg)
 		case "3":

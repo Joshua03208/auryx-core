@@ -18,8 +18,9 @@ type Config struct {
 	Name           string `json:"name"`
 	CoresMode      string `json:"cores_mode"` // "all" | "all_but_one" | "single" | "custom"
 	Cores          int    `json:"cores"`      // used when CoresMode == "custom"
-	LifetimeBlocks int    `json:"lifetime_blocks"`
-	LifetimeWei    string `json:"lifetime_wei"` // total AURYX earned ever, in wei (decimal string)
+	LifetimeBlocks  int     `json:"lifetime_blocks"`
+	LifetimeWei     string  `json:"lifetime_wei"`     // total AURYX earned ever, in wei (decimal string)
+	LifetimeSeconds float64 `json:"lifetime_seconds"` // total time spent mining ever
 }
 
 // addLifetime records a won block + its reward into the all-time totals.

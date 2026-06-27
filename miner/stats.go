@@ -187,6 +187,45 @@ type lbEntry struct {
 	Mined   string `json:"mined"`
 }
 
+// cached leaderboard position, refreshed in the background so the menu never
+// blocks on a network call. rankText is "" until the first fetch completes.
+var (
+	rankMu   sync.Mutex
+	rankText string
+)
+
+// refreshRank fetches the leaderboard and updates the cached position for addr.
+// Safe to call from a goroutine; it only ever replaces rankText.
+func refreshRank(addr string) {
+	lb, err := fetchLeaderboard()
+	rankMu.Lock()
+	defer rankMu.Unlock()
+	if err != nil {
+		if rankText == "" {
+			rankText = "unavailable"
+		}
+		return
+	}
+	me := strings.ToLower(addr)
+	for i, e := range lb {
+		if strings.ToLower(e.Address) == me {
+			rankText = fmt.Sprintf("#%d of %d", i+1, len(lb))
+			return
+		}
+	}
+	if len(lb) == 0 {
+		rankText = "no miners yet"
+	} else {
+		rankText = fmt.Sprintf("unranked (top %d shown)", len(lb))
+	}
+}
+
+func currentRank() string {
+	rankMu.Lock()
+	defer rankMu.Unlock()
+	return rankText
+}
+
 func fetchLeaderboard() ([]lbEntry, error) {
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Get(leaderboardURL)
