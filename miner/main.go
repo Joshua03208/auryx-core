@@ -161,17 +161,27 @@ func interactiveSetup(cfg Config) Config {
 	return cfg
 }
 
-func settingsMenu(cfg *Config) {
+// settingsMenu lets the user pick CPU cores and an optional faster RPC. Returns
+// true if the RPC changed, so the caller can reconnect with it.
+func settingsMenu(cfg *Config) bool {
 	total := runtime.NumCPU()
+	rpcChanged := false
 	for {
-		uiTitle("CPU SETTINGS")
+		rpcShown := cfg.RPC
+		if rpcShown == "" || rpcShown == defaultRPC {
+			rpcShown = defaultRPC + "  (default, shared)"
+		}
+		uiTitle("SETTINGS")
 		uiRow("Detected", fmt.Sprintf("%d cores", total))
-		uiRow("Current", fmt.Sprintf("%s (%d cores)", cfg.coresLabel(), cfg.resolveCores()))
+		uiRow("CPU use", fmt.Sprintf("%s (%d cores)", cfg.coresLabel(), cfg.resolveCores()))
+		uiRow("RPC", rpcShown)
 		fmt.Println()
 		uiOption("1", fmt.Sprintf("Use all cores (%d)", total))
 		uiOption("2", fmt.Sprintf("Use all but one (%d) - recommended", max(1, total-1)))
 		uiOption("3", "Single core")
-		uiOption("4", "Custom number")
+		uiOption("4", "Custom number of cores")
+		uiOption("5", "Set a faster RPC (paste your own dedicated URL)")
+		uiOption("6", "Reset RPC to default")
 		uiOption("0", "Back")
 		switch ask("\n   > ") {
 		case "1":
@@ -189,8 +199,28 @@ func settingsMenu(cfg *Config) {
 				cfg.Cores = n
 				saveConfig(*cfg)
 			}
+		case "5":
+			fmt.Println("  Get a FREE Base Sepolia RPC from alchemy.com or quicknode.com")
+			fmt.Println("  (sign up -> create a Base Sepolia app -> copy the https URL).")
+			fmt.Println("  Your own RPC means far less 'beaten / submit failed'. Blank = cancel.")
+			u := strings.TrimSpace(ask("  RPC URL: "))
+			if u != "" {
+				cfg.RPC = u
+				saveConfig(*cfg)
+				rpcChanged = true
+				uiInfo("Saved. It'll be used next time you start mining.")
+				ask("  Press Enter.")
+			}
+		case "6":
+			if cfg.RPC != "" && cfg.RPC != defaultRPC {
+				cfg.RPC = ""
+				saveConfig(*cfg)
+				rpcChanged = true
+			}
+			uiInfo("RPC reset to the default.")
+			ask("  Press Enter.")
 		case "0":
-			return
+			return rpcChanged
 		}
 	}
 }
@@ -209,7 +239,7 @@ func menu(chain *Chain, cfg *Config) string {
 		uiRow("CPU", fmt.Sprintf("%s (%d of %d cores)", cfg.coresLabel(), cfg.resolveCores(), runtime.NumCPU()))
 		fmt.Println()
 		uiOption("1", "Start mining")
-		uiOption("2", "Settings (CPU cores)")
+		uiOption("2", "Settings (CPU + RPC)")
 		uiOption("3", "Change wallet")
 		uiOption("4", "Log out")
 		uiOption("0", "Quit")
@@ -217,7 +247,9 @@ func menu(chain *Chain, cfg *Config) string {
 		case "1":
 			runMining(chain, cfg.resolveCores(), 0)
 		case "2":
-			settingsMenu(cfg)
+			if settingsMenu(cfg) {
+				return "reconnect" // RPC changed → runMenu rebuilds the connection
+			}
 		case "3":
 			return "changekey"
 		case "4":
@@ -248,10 +280,16 @@ func main() {
 	// The coin + network are baked into the binary (overridable only by an explicit
 	// --rpc/--contract flag). We force them here, ignoring any saved values, so a
 	// redeploy is picked up on rebuild and a stale saved address can't mislead.
-	cfg.RPC = defaultRPC
+	// RPC: a custom RPC saved in Settings wins, else the baked-in default. A
+	// dedicated RPC cuts the "beaten / submit failed" you get on the busy public one.
+	if cfg.RPC == "" {
+		cfg.RPC = defaultRPC
+	}
 	if *rpc != "" {
 		cfg.RPC = *rpc
 	}
+	// The contract is always the baked-in current one (ignore any saved value) so a
+	// redeploy is picked up on rebuild and a stale saved address can't mislead.
 	cfg.Contract = defaultContract
 	if *contract != "" {
 		cfg.Contract = *contract
