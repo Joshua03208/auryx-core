@@ -79,6 +79,18 @@ func formatRate(hps float64) string {
 	}
 }
 
+// expectedHashes returns the average number of hashes needed to solve a block at
+// the given target (= 2^256 / target). PoW is memoryless, so this is a statistical
+// average, not a countdown — an individual block can take far more or far fewer.
+func expectedHashes(target *big.Int) float64 {
+	if target == nil || target.Sign() <= 0 {
+		return 0
+	}
+	maxVal := new(big.Float).SetInt(new(big.Int).Lsh(big.NewInt(1), 256))
+	f, _ := new(big.Float).Quo(maxVal, new(big.Float).SetInt(target)).Float64()
+	return f
+}
+
 // runMining mines round after round. If maxBlocks > 0 it stops after that many
 // wins (used by tests / scripted runs); 0 means run until interrupted.
 func runMining(chain *Chain, cores int, maxBlocks int) {
@@ -103,7 +115,15 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 		}
 	}()
 
-	// live hashrate readout
+	// Per-block stats shared with the live readout below. blockExpected is the
+	// average hashes this block should take (from its difficulty); blockStartHash
+	// is the hash count when the block began, so cur-start = hashes into this block.
+	var rmu sync.Mutex
+	var blockStartHash int64
+	var blockExpected float64
+
+	// live progress readout: how far through the *average* effort this block is.
+	// It can pass 100% (this block is taking longer than average) — that's normal.
 	go func() {
 		t := time.NewTicker(4 * time.Second)
 		defer t.Stop()
@@ -114,8 +134,19 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 				return
 			case now := <-t.C:
 				cur := hashesDone()
-				if dt := now.Sub(lastT).Seconds(); dt > 0 && cur > last {
-					uiInfo("hashing at " + formatRate(float64(cur-last)/dt))
+				dt := now.Sub(lastT).Seconds()
+				if dt > 0 && cur > last {
+					rate := float64(cur-last) / dt
+					rmu.Lock()
+					start, exp := blockStartHash, blockExpected
+					rmu.Unlock()
+					if exp > 0 && rate > 0 {
+						pct := float64(cur-start) / exp * 100
+						uiInfo(fmt.Sprintf("mining . %.0f%% of avg block . %s . ~%ds/block",
+							pct, formatRate(rate), int(exp/rate)))
+					} else {
+						uiInfo("hashing at " + formatRate(rate))
+					}
 				}
 				last, lastT = cur, now
 			}
@@ -151,6 +182,13 @@ func runMining(chain *Chain, cores int, maxBlocks int) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
+
+		// reset progress for this block: where the hash counter is now, and how
+		// many hashes this difficulty should take on average.
+		rmu.Lock()
+		blockStartHash = hashesDone()
+		blockExpected = expectedHashes(target)
+		rmu.Unlock()
 
 		var once sync.Once
 		stop := make(chan struct{})
