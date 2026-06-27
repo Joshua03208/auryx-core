@@ -40,10 +40,50 @@ The difficulty is enforced **by the contract**, not the miner — so a modified
 miner can't cheat; invalid solutions are simply rejected. That's why the miner can
 be fully open source.
 
+## Set up your wallet (MetaMask + Base Sepolia)
+
+You mine into an ordinary EVM wallet. AURYX lives on Base, so MetaMask works
+out of the box — you just need to point it at the **Base Sepolia testnet**.
+
+> 🔒 **Use a fresh, dedicated wallet for mining** — not your main one. The miner
+> needs your private key (stored locally on your machine), so treat this as a
+> throwaway "hot" wallet that only ever holds testnet funds.
+
+**1. Add the Base Sepolia network to MetaMask.** Networks → *Add a network* →
+*Add a network manually*, and enter:
+
+| Setting | Value |
+|---|---|
+| Network name | `Base Sepolia` |
+| RPC URL | `https://sepolia.base.org` |
+| Chain ID | `84532` |
+| Currency symbol | `ETH` |
+| Block explorer URL | `https://sepolia.basescan.org` |
+
+**2. Get free test ETH for gas.** Switch MetaMask to Base Sepolia, copy your
+address, and request testnet ETH from a **Base Sepolia faucet** (e.g. the
+Coinbase Developer Platform faucet). You only need a small amount — it pays the
+tiny gas fee each time the miner submits a solved block.
+
+**3. (Optional) See your AURYX balance in MetaMask.** *Import tokens* → paste the
+contract address below; the symbol (`AURYX`) and decimals fill in automatically:
+
+```
+0x619Ab437232f58fd0FC7606b98BB2D4948734750
+```
+
+**4. Get your private key for the miner.** In MetaMask: account menu → *Account
+details* → *Show private key* (it'll ask for your password). Copy it — you'll
+paste it into the miner on first run.
+
+> ⚠️ Your private key controls the wallet completely. Never share it, never paste
+> it into a website, and never use your main wallet's key. The miner saves it to a
+> local `auryx-miner.json` only to sign **your own** mint transactions.
+
 ## Mine it
 
-You need a wallet with a little **Base Sepolia test ETH** for gas (free from a
-Base Sepolia faucet). That same wallet receives your mined AURYX.
+You now have a wallet on Base Sepolia with a little test ETH for gas. That same
+wallet receives your mined AURYX.
 
 **Download a prebuilt miner** from the [Releases](../../releases) page, or build it:
 
