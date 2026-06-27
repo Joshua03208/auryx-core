@@ -187,19 +187,22 @@ type lbEntry struct {
 	Mined   string `json:"mined"`
 }
 
-// cached leaderboard position, refreshed in the background so the menu never
-// blocks on a network call. rankText is "" until the first fetch completes.
+// cached leaderboard position. Fetched synchronously while the menu renders
+// (like the balance), but cached so rapid re-renders don't re-hit the network.
 var (
-	rankMu   sync.Mutex
-	rankText string
+	rankMu      sync.Mutex
+	rankText    string
+	rankFetched time.Time
 )
 
 // refreshRank fetches the leaderboard and updates the cached position for addr.
-// Safe to call from a goroutine; it only ever replaces rankText.
+// On a transient error it keeps the last known rank but still stamps the time
+// so we don't hammer the server on every render.
 func refreshRank(addr string) {
 	lb, err := fetchLeaderboard()
 	rankMu.Lock()
 	defer rankMu.Unlock()
+	rankFetched = time.Now()
 	if err != nil {
 		if rankText == "" {
 			rankText = "unavailable"
@@ -218,6 +221,27 @@ func refreshRank(addr string) {
 	} else {
 		rankText = fmt.Sprintf("unranked (top %d shown)", len(lb))
 	}
+}
+
+// ensureRank returns the position, refreshing synchronously if the cache is
+// empty or older than ttl. The server caches the leaderboard, so this is quick.
+func ensureRank(addr string, ttl time.Duration) string {
+	rankMu.Lock()
+	fresh := rankText != "" && time.Since(rankFetched) < ttl
+	cur := rankText
+	rankMu.Unlock()
+	if !fresh {
+		refreshRank(addr)
+		cur = currentRank()
+	}
+	return cur
+}
+
+// invalidateRank forces the next ensureRank to re-fetch (e.g. after mining).
+func invalidateRank() {
+	rankMu.Lock()
+	rankFetched = time.Time{}
+	rankMu.Unlock()
 }
 
 func currentRank() string {

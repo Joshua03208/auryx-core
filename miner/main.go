@@ -351,14 +351,13 @@ func settingsMenu(cfg *Config) {
 
 // menu returns an action for runMenu to handle: "quit", "changekey", or "logout".
 func menu(chain *Chain, cfg *Config) string {
-	go refreshRank(chain.From().Hex()) // fetch leaderboard position in the background
 	for {
 		bal := "(checking...)"
 		if b, err := chain.Balance(context.Background(), chain.From()); err == nil {
 			bal = formatAURYX(b) + " AURYX"
 		}
 		uiTitle("A U R Y X   M I N E R")
-		rank := currentRank()
+		rank := ensureRank(chain.From().Hex(), 20*time.Second)
 		if rank == "" {
 			rank = "checking..."
 		}
@@ -386,7 +385,7 @@ func menu(chain *Chain, cfg *Config) string {
 		switch ask("\n   > ") {
 		case "1":
 			runMining(chain, cfg, 0)
-			go refreshRank(chain.From().Hex()) // position likely changed
+			invalidateRank() // position likely changed; refresh on next render
 		case "2":
 			showStats(chain, cfg)
 		case "3":
